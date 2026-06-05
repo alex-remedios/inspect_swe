@@ -1,4 +1,5 @@
 import shlex
+import socket
 import uuid
 from pathlib import Path
 from textwrap import dedent
@@ -19,7 +20,6 @@ from inspect_ai.tool import MCPServerConfig, Skill, install_skills, read_skills
 from inspect_ai.util import (
     ExecRemoteStreamingOptions,
     StoreModel,
-    store,
     store_as,
 )
 from inspect_ai.util import (
@@ -149,10 +149,11 @@ def claude_code(
         # allocate a fresh session_id per sample so concurrent / sequential samples
         # in a multi-epoch run don't collide on "session already in use".
         session_id = str(uuid.uuid4())
-        # determine port (use new port for each execution of agent on sample)
-        MODEL_PORT = "claude_code_model_port"
-        port = store().get(MODEL_PORT, 3000) + 1
-        store().set(MODEL_PORT, port)
+        # OS-assigned free port — previous fixed-base allocator collided
+        # on shared hosts when port 3001 was held by another process.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _probe:
+            _probe.bind(("127.0.0.1", 0))
+            port = _probe.getsockname()[1]
 
         # Real-time consumer of Claude Code JSONL output. Doubles as the
         # bridge's ModelEventSink — the bridge hands us every ModelEvent
