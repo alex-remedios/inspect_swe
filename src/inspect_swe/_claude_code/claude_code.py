@@ -79,6 +79,7 @@ def claude_code(
     sandbox: str | None = None,
     version: Literal["auto", "sandbox", "stable", "latest"] | str = "auto",
     debug: bool | None = None,
+    hold_open_seconds: int | None = None,
 ) -> Agent:
     """Claude Code agent.
 
@@ -134,6 +135,12 @@ def claude_code(
             - "latest": Download and use the very latest version of claude code.
             - "x.x.x": Download and use a specific version of claude code.
         debug: Add `--debug` cli flag and trace all debug output.
+        hold_open_seconds: When set, run with `--input-format stream-json` and hold
+            stdin open this many seconds (no `-- <prompt>` argv). Claude Code's cron
+            scheduler stops the instant stdin EOFs, so holding it open lets a durable
+            scheduled task (`.claude/scheduled_tasks.json`) fire its own user turn
+            mid-session — used to exercise cross-session cron re-entry without
+            fabricating the fired prompt. The session ends when the hold elapses.
     """
     # resolve centaur
     if centaur is True:
@@ -209,6 +216,10 @@ def claude_code(
             # add interactive options if not running as centaur
             if centaur is False:
                 cmd.extend(["--print", "--output-format", "stream-json", "--verbose"])
+                # hold-open mode: read from a held-open stdin (no argv prompt) so a
+                # durable cron can fire mid-session — see exec wrapper below.
+                if hold_open_seconds is not None:
+                    cmd.extend(["--input-format", "stream-json"])
                 if debug:
                     cmd.append("--debug")
 
@@ -257,6 +268,9 @@ def claude_code(
                 "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
                 "IS_SANDBOX": "1",
             } | (env or {})
+            # hold-open mode: the exec wrapper reads this to keep stdin open N seconds.
+            if hold_open_seconds is not None:
+                agent_env["CC_HOLD_OPEN"] = str(hold_open_seconds)
 
             # Claude Code 2.1.37 reports "has Authorization header: false"
             # despite ANTHROPIC_AUTH_TOKEN being set in the environment,
@@ -311,20 +325,26 @@ def claude_code(
                                     "\n\n".join(system_texts),
                                 ]
 
+                        # hold-open mode reads the prompt from the held-open stdin
+                        # (none here — the durable cron supplies the turn), so no
+                        # `-- <prompt>` argv suffix.
+                        prompt_suffix = (
+                            [] if hold_open_seconds is not None else ["--", agent_prompt]
+                        )
                         # resume previous conversation
                         if is_resume:
                             agent_cmd = (
                                 [claude_binary, "--resume", session_id]
                                 + cmd
                                 + system_args
-                                + ["--", agent_prompt]
+                                + prompt_suffix
                             )
                         else:
                             agent_cmd = (
                                 [claude_binary, "--session-id", session_id]
                                 + cmd
                                 + system_args
-                                + ["--", agent_prompt]
+                                + prompt_suffix
                             )
 
                         # Fresh consumer state per attempt — agent-tree maps
@@ -337,8 +357,19 @@ def claude_code(
                         # launch Claude Code in streaming mode; drain stdout in
                         # real time so the consumer emits agent spans and the
                         # bridge resolver sees Task prompts as they appear.
+                        # Default: detach stdin (0</dev/null). Hold-open mode instead
+                        # pipes an empty `sleep N` into CC so stdin stays open for N
+                        # seconds — CC's cron scheduler stops the instant stdin EOFs
+                        # (cronScheduler unrefs its timer), so the held-open pipe is
+                        # what lets a durable cron fire mid-session before the sleep
+                        # ends and closes it.
+                        stdin_wrapper = (
+                            'sleep "$CC_HOLD_OPEN" | "$@"'
+                            if hold_open_seconds is not None
+                            else 'exec 0</dev/null; "$@"'
+                        )
                         proc = await sbox.exec_remote(
-                            cmd=["bash", "-c", 'exec 0</dev/null; "$@"', "bash"]
+                            cmd=["bash", "-c", stdin_wrapper, "bash"]
                             + agent_cmd,
                             options=ExecRemoteStreamingOptions(
                                 cwd=cwd,
