@@ -18,6 +18,13 @@ class CentaurOptions(BaseModel):
     record_session: bool = Field(default=True)
     """Record all user commands and outputs in the sandbox bash session."""
 
+    extra_bashrc: list[str] = Field(default_factory=list)
+    """Extra shell lines appended to the centaur session's generated `.bashrc`,
+    after the default env exports, config seed, and `claude` alias. Lets a caller
+    customize the human-driven session — e.g. seed extra `$HOME/.claude.json`
+    keys or set additional env — without forking this module. Default: empty
+    (the generated `.bashrc` is unchanged)."""
+
 
 async def run_centaur(
     options: CentaurOptions, instructions: str, bashrc: str, state: AgentState

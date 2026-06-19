@@ -557,8 +557,11 @@ async def run_claude_code_centaur(
     ]
     alias_cmd = shlex.join(claude_cmd)
     alias_cmd = "alias claude='" + alias_cmd.replace("'", "'\\''") + "'"
+    # Caller-supplied lines run last so they can override the seeded config / env
+    # above (e.g. re-write $HOME/.claude.json). Empty by default → bashrc unchanged.
+    extra = ["", *options.extra_bashrc] if options.extra_bashrc else []
     bashrc = "\n".join(
-        agent_env_vars + path_config + ["", claude_config, "", alias_cmd]
+        agent_env_vars + path_config + ["", claude_config, "", alias_cmd] + extra
     )
 
     # run the human cli
